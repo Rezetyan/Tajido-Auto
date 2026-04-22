@@ -1,0 +1,2 @@
+帖子链接示例：https://www.tajiduo.com/bbs/index.html#/post?postId=182588
+主页示例：https://www.tajiduo.com/bbs/index.html#/home?id=2
