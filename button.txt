@@ -1,2 +1,0 @@
-发帖子:<a class="w-[72px] h-[86px] rounded-lg cursor-pointer hover:bg-seconday-color-hover flex-center flex-col" href="#/create"><img src="/bbs/publish/word.png" class="w-11 h-11"><p class="text-[#666666] text-sm">发帖子</p></a>
-请输入标题:<input maxlength="50" placeholder="请输入标题" id="subject" aria-required="true" class="ant-input ant-input-lg css-1skxyqd" type="text" value="">

@@ -30,6 +30,15 @@ error_*.png
 api_response.json
 dom_dump.html
 
+# Local development-only files
+test_regex.py
+test_scroll.py
+test_scroll_js.py
+button.txt
+detail.txt
+dianzan.md
+resume.txt
+
 # IDE/OS files
 .vscode/
 .idea/
