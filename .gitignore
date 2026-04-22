@@ -31,6 +31,8 @@ api_response.json
 dom_dump.html
 
 # Local development-only files
+analyze_api.py
+analyze_dom.py
 test_regex.py
 test_scroll.py
 test_scroll_js.py
