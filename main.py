@@ -3,6 +3,7 @@ from core.auth_manager import AuthManager
 from core.post_manager import PostManager
 from core.interaction_manager import InteractionManager
 from utils.logger import logger
+from utils.config import DRY_RUN, TARGET_URL
 import os
 
 async def main():
@@ -17,13 +18,14 @@ async def main():
         # Start API context for hybrid requests
         api_context = context.request
         
-        post_manager = PostManager(page)
-        interaction_manager = InteractionManager(page, api_context)
+        post_manager = PostManager(page, dry_run=DRY_RUN)
+        interaction_manager = InteractionManager(page, api_context, dry_run=DRY_RUN)
         
         # =================================================================
-        # ⚠️ Instructions: Uncomment the tasks below to run them.
-        # Make sure to adjust the DOM selectors inside the manager classes
-        # before running against the real website.
+        # Instructions: Uncomment the tasks below to run them.
+        # For a safe local rehearsal, run with:
+        #   $env:TAJIDO_DRY_RUN="1"; python main.py
+        # Dry-run fills and discovers items but skips submit/send/like clicks.
         # =================================================================
         
         # 1. Post a new image/text
@@ -34,7 +36,11 @@ async def main():
         # await interaction_manager.reply_to_comments()
         
         # 3. Browse a specific tag and like posts
-        # await interaction_manager.browse_and_like(tag="general", max_likes=3)
+        # await interaction_manager.browse_and_like(
+        #     target_url=TARGET_URL,
+        #     max_likes=3,
+        #     max_time_minutes=10,
+        # )
         
         logger.info("All tasks completed successfully.")
         

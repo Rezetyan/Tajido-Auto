@@ -8,6 +8,7 @@ import sys
 from core.auth_manager import AuthManager
 from core.post_manager import PostManager
 from core.interaction_manager import InteractionManager
+from utils.config import DRY_RUN
 from utils.logger import logger
 import logging
 
@@ -47,6 +48,9 @@ class TajidoGUI:
         
         self.post_manager = None
         self.interaction_manager = None
+        self.task_running = False
+        self.current_task = None
+        self.dry_run_var = tk.BooleanVar(value=DRY_RUN)
 
         self.setup_ui()
 
@@ -106,6 +110,13 @@ class TajidoGUI:
         self.btn_stop = tk.Button(browse_btn_frame, text="停止当前任务", command=self.stop_task, state=tk.DISABLED, width=15, bg="#f2dede")
         self.btn_stop.pack(side=tk.TOP)
 
+        self.chk_dry_run = tk.Checkbutton(
+            control_frame,
+            text="Dry-run：只演练流程，不提交/发送/点赞",
+            variable=self.dry_run_var,
+        )
+        self.chk_dry_run.grid(row=5, column=1, columnspan=2, sticky="w", pady=(8, 0))
+
         # 2. 日志输出面板
         log_frame = tk.LabelFrame(self.root, text="实时运行日志", padx=10, pady=10)
         log_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -125,7 +136,49 @@ class TajidoGUI:
         """将异步任务投递到后台事件循环中执行"""
         asyncio.run_coroutine_threadsafe(coro, self.loop)
 
+    def set_task_running(self, task_name, allow_stop=False):
+        if self.task_running:
+            logger.warning(f"当前任务正在运行中: {self.current_task}，请等待完成或停止后再试。")
+            return False
+
+        self.task_running = True
+        self.current_task = task_name
+        self.btn_init.config(state=tk.DISABLED)
+        self.btn_post.config(state=tk.DISABLED)
+        self.btn_reply.config(state=tk.DISABLED)
+        self.btn_like.config(state=tk.DISABLED)
+        self.btn_stop.config(state=tk.NORMAL if allow_stop else tk.DISABLED)
+        self.chk_dry_run.config(state=tk.DISABLED)
+        return True
+
+    def clear_task_running(self):
+        self.task_running = False
+        self.current_task = None
+        if self.context:
+            self.btn_init.config(state=tk.DISABLED, text="浏览器已连接，运行中...", bg="#dff0d8")
+            self.btn_post.config(state=tk.NORMAL)
+            self.btn_reply.config(state=tk.NORMAL)
+            self.btn_like.config(state=tk.NORMAL)
+        else:
+            self.btn_init.config(state=tk.NORMAL, text="1. 初始化 / 登录浏览器", bg="#d9edf7")
+            self.btn_post.config(state=tk.DISABLED)
+            self.btn_reply.config(state=tk.DISABLED)
+            self.btn_like.config(state=tk.DISABLED)
+        self.btn_stop.config(state=tk.DISABLED)
+        self.chk_dry_run.config(state=tk.NORMAL)
+
+    def apply_dry_run_setting(self):
+        dry_run = bool(self.dry_run_var.get())
+        if self.post_manager:
+            self.post_manager.dry_run = dry_run
+        if self.interaction_manager:
+            self.interaction_manager.dry_run = dry_run
+        return dry_run
+
     def run_init(self):
+        if self.task_running:
+            logger.warning(f"当前任务正在运行中: {self.current_task}")
+            return
         self.btn_init.config(state=tk.DISABLED, text="正在启动浏览器...")
         self.run_coroutine(self._async_init())
 
@@ -139,8 +192,9 @@ class TajidoGUI:
             self.api_context = self.context.request
             
             # 初始化Managers
-            self.post_manager = PostManager(self.page)
-            self.interaction_manager = InteractionManager(self.page, self.api_context)
+            dry_run = bool(self.dry_run_var.get())
+            self.post_manager = PostManager(self.page, dry_run=dry_run)
+            self.interaction_manager = InteractionManager(self.page, self.api_context, dry_run=dry_run)
             
             # 监听浏览器上下文关闭事件
             self.context.on("close", lambda _: self.root.after(0, self.on_browser_closed))
@@ -184,9 +238,12 @@ class TajidoGUI:
         self.btn_stop.config(state=tk.DISABLED)
 
     def run_post(self):
+        if not self.set_task_running("自动发帖"):
+            return
         text = self.entry_post_text.get()
         if not text:
             logger.warning("发帖内容不能为空！")
+            self.clear_task_running()
             return
             
         # 尝试读取 assets/sample.png 如果不存在则忽略
@@ -194,7 +251,7 @@ class TajidoGUI:
         if not os.path.exists(image_path):
             image_path = None
             
-        self.btn_post.config(state=tk.DISABLED)
+        self.apply_dry_run_setting()
         self.run_coroutine(self._async_post(text, image_path))
 
     async def _async_post(self, text, image_path):
@@ -204,10 +261,12 @@ class TajidoGUI:
         except Exception as e:
             logger.error(f"自动发帖任务异常: {e}")
         finally:
-            self.root.after(0, lambda: self.btn_post.config(state=tk.NORMAL))
+            self.root.after(0, self.clear_task_running)
 
     def run_reply(self):
-        self.btn_reply.config(state=tk.DISABLED)
+        if not self.set_task_running("自动回复"):
+            return
+        self.apply_dry_run_setting()
         self.run_coroutine(self._async_reply())
 
     async def _async_reply(self):
@@ -217,12 +276,15 @@ class TajidoGUI:
         except Exception as e:
             logger.error(f"自动回复任务异常: {e}")
         finally:
-            self.root.after(0, lambda: self.btn_reply.config(state=tk.NORMAL))
+            self.root.after(0, self.clear_task_running)
 
     def run_like(self):
+        if not self.set_task_running("自动浏览点赞", allow_stop=True):
+            return
         target_url = self.entry_url.get()
         if not target_url:
             logger.warning("目标链接不能为空！")
+            self.clear_task_running()
             return
             
         try:
@@ -230,10 +292,10 @@ class TajidoGUI:
             max_time = float(self.entry_time.get())
         except ValueError:
             logger.error("点赞数和最长运行时间必须是有效的数字！")
+            self.clear_task_running()
             return
             
-        self.btn_like.config(state=tk.DISABLED)
-        self.btn_stop.config(state=tk.NORMAL)
+        self.apply_dry_run_setting()
         self.run_coroutine(self._async_like(target_url, max_likes, max_time))
 
     async def _async_like(self, target_url, max_likes, max_time):
@@ -247,8 +309,7 @@ class TajidoGUI:
         except Exception as e:
             logger.error(f"自动浏览任务异常: {e}")
         finally:
-            self.root.after(0, lambda: self.btn_like.config(state=tk.NORMAL))
-            self.root.after(0, lambda: self.btn_stop.config(state=tk.DISABLED))
+            self.root.after(0, self.clear_task_running)
         
     def on_closing(self):
         logger.info("正在关闭程序...")

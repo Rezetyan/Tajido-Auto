@@ -1,7 +1,11 @@
 import logging
 import os
 
-def setup_logger(name="TajidoAuto", log_file="tajido.log"):
+from utils.config import LOG_FILE, RUNTIME_DIR
+
+
+def setup_logger(name="TajidoAuto", log_file=LOG_FILE):
+    os.makedirs(RUNTIME_DIR, exist_ok=True)
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
 

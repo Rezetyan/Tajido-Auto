@@ -1,0 +1,15 @@
+<!doctype html>
+<html>
+<body>
+  <div id="like" class="h-14 cursor-pointer group text-tajido-gray-3 bg-[#f3f4f5]" data-action="like">
+    <div class="w-[26px] h-[26px] bg-[url(/icon/like.png)]"></div>
+    <span>10</span>
+  </div>
+  <script>
+    window.likeClicked = false;
+    document.querySelector("#like").addEventListener("click", () => {
+      window.likeClicked = true;
+    });
+  </script>
+</body>
+</html>

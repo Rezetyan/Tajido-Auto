@@ -4,11 +4,24 @@ import time
 import re
 from playwright.async_api import Page, APIRequestContext
 from utils.logger import logger
+from utils.config import POST_URL_TEMPLATE, REPLY_URL
+from utils.playwright_helpers import click_first, fill_first, first_visible_locator, safe_screenshot
+from utils.selectors import LIKE_SELECTORS, REPLY_SELECTORS
 
 class InteractionManager:
-    def __init__(self, page: Page, api_context: APIRequestContext = None):
+    def __init__(
+        self,
+        page: Page,
+        api_context: APIRequestContext = None,
+        dry_run: bool = False,
+        reply_url: str = REPLY_URL,
+        post_url_template: str = POST_URL_TEMPLATE,
+    ):
         self.page = page
-        self.api_context = api_context # For hybrid approach (API calls)
+        self.api_context = api_context
+        self.dry_run = dry_run
+        self.reply_url = reply_url
+        self.post_url_template = post_url_template
         self.auth_headers = {}
         self.is_running = False
         self.discovered_post_ids = set()
@@ -27,27 +40,21 @@ class InteractionManager:
         try:
             url = response.url.lower()
             if "/api/" in url or "/v1/" in url or "/wapi/" in url or "/bbs" in url:
-                # 过滤掉图片和多媒体请求，防止 body 读取异常
-                if any(ext in url for ext in [".png", ".jpg", ".jpeg", ".gif", ".mp4"]):
+                if any(ext in url for ext in [".png", ".jpg", ".jpeg", ".gif", ".mp4", ".css", ".js"]):
                     return
                     
                 body = await response.text()
-                
-                # 策略1: 明确寻找 "postId": 12345
-                post_ids = re.findall(r'"postId"\s*:\s*"?(\d{4,9})', body)
+
+                post_ids = self.extract_post_ids(body)
                 if post_ids:
                     self.discovered_post_ids.update(post_ids)
-                    logger.debug(f"API 拦截: 从 {url} 抓取到 {len(post_ids)} 个 postId")
-                    
-                # 策略2: 如果是列表接口，直接抓取通用 "id" 字段
-                if any(x in url for x in ['list', 'feed', 'recommend', 'home', 'post', 'topic']):
-                    ids = re.findall(r'"id"\s*:\s*"?(\d{5,9})', body)
-                    if ids:
-                        self.discovered_post_ids.update(ids)
-                        logger.debug(f"API 拦截: 从 {url} 抓取到 {len(ids)} 个 id")
+                    logger.debug(f"API intercept: captured {len(post_ids)} post IDs from {url}")
         except Exception as e:
-            # 静默处理由于页面跳转等原因导致的 read text 失败
-            pass
+            logger.debug(f"Unable to inspect response for post IDs: {e}")
+
+    @staticmethod
+    def extract_post_ids(body: str) -> set[str]:
+        return set(re.findall(r'"postId"\s*:\s*"?(\d{4,12})', body))
 
     async def delay(self, min_s=1.5, max_s=4.5):
         sleep_time = random.uniform(min_s, max_s)
@@ -60,38 +67,78 @@ class InteractionManager:
 
     async def reply_to_comments(self):
         logger.info("Checking for new comments to reply...")
+        result = {
+            "ok": False,
+            "dry_run": self.dry_run,
+            "replied_count": 0,
+            "would_reply_count": 0,
+        }
         try:
-            await self.page.goto("https://www.tajiduo.com/bbs/index.html#/notifications")
-            await self.page.wait_for_load_state('networkidle')
+            await self.page.goto(self.reply_url)
+            try:
+                await self.page.wait_for_load_state('networkidle', timeout=8000)
+            except Exception:
+                logger.debug("Reply page did not reach networkidle before timeout.")
             await self.delay()
 
-            reply_buttons = await self.page.locator('button.reply-btn.unread').all()
+            reply_buttons = []
+            for selector in REPLY_SELECTORS.unread_reply_buttons:
+                buttons = await self.page.locator(selector).all()
+                if buttons:
+                    reply_buttons = buttons
+                    logger.debug(f"Reply buttons matched selector: {selector}")
+                    break
+
             logger.info(f"Found {len(reply_buttons)} unread comments.")
             
             for btn in reply_buttons:
-                await btn.click()
-                await self.delay(0.5, 1.5)
-                await self.page.locator('textarea.reply-editor').fill("感谢您的支持！")
-                await self.delay(0.5, 1.0)
-                await self.page.click('button.send-reply-btn')
-                logger.info("Replied to a comment successfully.")
+                if self.dry_run:
+                    result["would_reply_count"] += 1
+                    logger.info("Dry-run enabled; skipping reply open/fill/send.")
+                else:
+                    await btn.click()
+                    await self.delay(0.5, 1.5)
+                    await fill_first(self.page, REPLY_SELECTORS.reply_editors, "感谢您的支持！", "reply editor")
+                    await self.delay(0.5, 1.0)
+                    await click_first(self.page, REPLY_SELECTORS.send_buttons, "send reply")
+                    result["replied_count"] += 1
+                    logger.info("Replied to a comment successfully.")
                 await self.delay()
+
+            result["ok"] = True
+            return result
 
         except Exception as e:
             logger.error(f"Error while replying to comments: {e}")
-            await self.page.screenshot(path="error_reply.png")
+            await safe_screenshot(self.page, "error_reply")
+            raise
 
     async def browse_and_like(self, target_url: str, max_likes: int = 5, max_time_minutes: float = 10.0):
         self.is_running = True
         self.discovered_post_ids.clear()
         processed_post_ids = set()
+        liked_count = 0
+        would_like_count = 0
         
         logger.info(f"开始自动浏览: {target_url}")
         logger.info(f"目标设置 -> 点赞数: {max_likes}, 最大运行时间: {max_time_minutes} 分钟")
         
         start_time = time.time()
+        result = {
+            "ok": False,
+            "dry_run": self.dry_run,
+            "liked_count": 0,
+            "would_like_count": 0,
+            "processed_post_ids": [],
+            "stopped": False,
+        }
         
         try:
+            if max_likes <= 0:
+                logger.info("点赞数为 0，自动浏览任务直接结束。")
+                result["ok"] = True
+                return result
+
             # 强制重载页面，确保重新触发 API 拦截，清空残留状态
             if self.page.url.split('#')[0] == target_url.split('#')[0]:
                 logger.info("重载页面以抓取最新帖子数据...")
@@ -100,21 +147,14 @@ class InteractionManager:
             else:
                 await self.page.goto(target_url, wait_until='networkidle')
             
-            liked_count = 0
             scroll_attempts = 0
             
             while self.is_running and liked_count < max_likes and (time.time() - start_time) < max_time_minutes * 60:
                 # 1. 提取当前页面上可见的常规帖子链接 (DOM Fallback)
                 try:
-                    link_locators = await self.page.locator('a[href*="postId="], a[href*="/post/"]').all()
-                    for loc in link_locators:
-                        href = await loc.get_attribute("href")
-                        if href:
-                            match = re.search(r'(?:postId=|\/post\/)(\d+)', href)
-                            if match:
-                                self.discovered_post_ids.add(match.group(1))
-                except Exception:
-                    pass
+                    await self._capture_post_ids_from_dom()
+                except Exception as exc:
+                    logger.debug(f"DOM post ID capture failed: {exc}")
                 
                 # 2. 结算待处理的全新帖子
                 pending_ids = list(self.discovered_post_ids - processed_post_ids)
@@ -132,8 +172,8 @@ class InteractionManager:
                         await asyncio.sleep(0.5)
                         await self.page.keyboard.press('PageDown')
                         await self.page.wait_for_load_state('networkidle', timeout=5000)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug(f"Scrolling list failed: {exc}")
                         
                     await self.delay(2.0, 4.0)
                     scroll_attempts += 1
@@ -158,7 +198,7 @@ class InteractionManager:
                     # 采用新标签页打开帖子，避免主列表页面的无限滚动状态丢失
                     new_page = await self.page.context.new_page()
                     try:
-                        post_full_url = f"https://www.tajiduo.com/bbs/index.html#/post?postId={pid}"
+                        post_full_url = self.post_url_template.format(post_id=pid)
                         await new_page.goto(post_full_url)
                         # 避免 networkidle 超时导致抛出异常中断整个流程，使用 try-except 包裹
                         try:
@@ -177,32 +217,30 @@ class InteractionManager:
                             if not self.is_running:
                                 break
                                 
-                            # 使用包含 like 图标的 div 群组，不预先限定颜色，便于识别已点赞状态
-                            like_btn = new_page.locator('div.group:has(div[class*="like"])').first
-                            
                             try:
-                                # 设置 1.5 秒超时，如果没看到就抛异常进入 except 块继续滚动
-                                await like_btn.wait_for(state="visible", timeout=1500)
+                                like_btn = await self.find_like_button(new_page, timeout=1500)
                                 found_like_btn = True
                                 await like_btn.scroll_into_view_if_needed()
                                 await asyncio.sleep(random.uniform(0.5, 1.0))
                                 
-                                # 获取按钮的 class，判断是否已点赞
-                                class_attr = await like_btn.get_attribute("class")
-                                # 注意：未点赞的按钮类名中也包含 hover:text-secondary-color
-                                # 因此，必须严格判断是否包含未点赞特有的灰色类名 text-tajido-gray-3
-                                if class_attr and "text-tajido-gray-3" not in class_attr:
+                                if await self.is_already_liked(like_btn):
                                     logger.info("检测到该帖子已点赞过，直接跳过并退出该帖子。")
                                     break
                                 
-                                logger.info("✅ 找到未点赞按钮，执行点赞点击...")
-                                await like_btn.click()
-                                liked_count += 1
-                                logger.info(f"点赞成功！进度: {liked_count} / {max_likes}")
+                                if self.dry_run:
+                                    would_like_count += 1
+                                    liked_count += 1
+                                    logger.info(f"Dry-run: 将会点赞该帖子。进度: {liked_count} / {max_likes}")
+                                else:
+                                    logger.info("找到未点赞按钮，执行点赞点击...")
+                                    await like_btn.click()
+                                    liked_count += 1
+                                    logger.info(f"点赞成功！进度: {liked_count} / {max_likes}")
                                 
                                 await asyncio.sleep(random.uniform(1.0, 2.0))
                                 break # 点赞完毕，跳出当前帖子的滚动寻找循环
-                            except Exception:
+                            except Exception as exc:
+                                logger.debug(f"Like button not found on scroll step {step + 1}: {exc}")
                                 # 没找到按钮，说明在屏幕下方，控制焦点并向下滚动一页
                                 try:
                                     viewport = new_page.viewport_size
@@ -210,8 +248,8 @@ class InteractionManager:
                                         await new_page.mouse.move(viewport['width'] / 2, viewport['height'] / 2)
                                     await new_page.keyboard.press('PageDown')
                                     await asyncio.sleep(0.8) # 给长帖子图片渲染留点时间
-                                except Exception:
-                                    pass
+                                except Exception as scroll_exc:
+                                    logger.debug(f"Scrolling post failed: {scroll_exc}")
                                 
                         if not found_like_btn and self.is_running:
                             logger.info("长达15页滚动后仍未发现点赞按钮，跳过。")
@@ -233,8 +271,8 @@ class InteractionManager:
                             await self.page.mouse.click(viewport['width'] / 2, viewport['height'] / 2)
                         await self.page.keyboard.press('PageDown')
                         await self.delay(2.0, 4.0)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug(f"Scrolling main list after queue failed: {exc}")
 
             # 循环退出后的汇总播报
             if not self.is_running:
@@ -244,8 +282,45 @@ class InteractionManager:
             else:
                 logger.info(f"=== 自动浏览任务结束！因达到时间上限或浏览到底部。共点赞: {liked_count} ===")
 
+            result.update(
+                {
+                    "ok": True,
+                    "liked_count": 0 if self.dry_run else liked_count,
+                    "would_like_count": would_like_count,
+                    "processed_post_ids": sorted(processed_post_ids),
+                    "stopped": not self.is_running,
+                }
+            )
+            return result
+
         except Exception as e:
             logger.error(f"浏览过程中发生致命错误: {e}")
-            await self.page.screenshot(path="error_browse.png")
+            await safe_screenshot(self.page, "error_browse")
+            raise
         finally:
             self.is_running = False
+
+    async def _capture_post_ids_from_dom(self):
+        for selector in LIKE_SELECTORS.post_links:
+            link_locators = await self.page.locator(selector).all()
+            for loc in link_locators:
+                href = await loc.get_attribute("href")
+                post_id = self.extract_post_id_from_href(href or "")
+                if post_id:
+                    self.discovered_post_ids.add(post_id)
+
+    @staticmethod
+    def extract_post_id_from_href(href: str) -> str | None:
+        match = re.search(r'(?:postId=|/post/)(\d+)', href)
+        return match.group(1) if match else None
+
+    async def find_like_button(self, page: Page, timeout: int = 1500):
+        return await first_visible_locator(page, LIKE_SELECTORS.like_buttons, "like button", timeout=timeout)
+
+    async def is_already_liked(self, locator) -> bool:
+        class_attr = await locator.get_attribute("class") or ""
+        html = await locator.evaluate("(el) => el.outerHTML")
+
+        if any(marker in class_attr or marker in html for marker in LIKE_SELECTORS.unliked_markers):
+            return False
+        return any(marker in class_attr or marker in html for marker in LIKE_SELECTORS.liked_markers)

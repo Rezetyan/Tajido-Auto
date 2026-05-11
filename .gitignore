@@ -21,6 +21,7 @@ ENV/
 # Playwright/browser runtime data
 browser_data/
 auth.json
+runtime/
 
 # Logs and runtime screenshots
 *.log

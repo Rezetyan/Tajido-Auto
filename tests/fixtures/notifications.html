@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<body>
+  <section class="unread" data-unread="true">
+    <p>新评论 A</p>
+    <button class="reply-btn unread">回复</button>
+  </section>
+  <section class="unread" data-unread="true">
+    <p>新评论 B</p>
+    <button class="reply-btn unread">回复</button>
+  </section>
+  <textarea class="reply-editor" placeholder="回复"></textarea>
+  <button class="send-reply-btn">发送</button>
+  <script>
+    window.sendClicked = 0;
+    document.querySelector(".send-reply-btn").addEventListener("click", () => {
+      window.sendClicked += 1;
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+<body>
+  <main>
+    <h1>发布帖子</h1>
+    <input id="subject" placeholder="请输入标题" />
+    <input id="image" type="file" />
+    <div class="w-e-text" contenteditable="true"></div>
+    <label>选择版区</label>
+    <div class="ant-select" id="category-select">
+      <input id="communityId-columnId" placeholder="请选择版区" />
+    </div>
+    <div class="ant-cascader-dropdown" id="category-dropdown" hidden>
+      <div class="ant-cascader-menu-item" id="community-option">异环</div>
+      <div class="ant-cascader-menu-item" id="column-option">「呗果」揭示板</div>
+    </div>
+    <button id="publish" type="submit">发 布</button>
+  </main>
+  <script>
+    window.publishClicked = false;
+    window.categoryClicks = [];
+    document.querySelector("#category-select").addEventListener("click", () => {
+      document.querySelector("#category-dropdown").hidden = false;
+    });
+    document.querySelector("#community-option").addEventListener("click", () => {
+      window.categoryClicks.push("异环");
+    });
+    document.querySelector("#column-option").addEventListener("click", () => {
+      window.categoryClicks.push("「呗果」揭示板");
+      document.querySelector("#communityId-columnId").value = "异环 / 「呗果」揭示板";
+      document.querySelector("#category-dropdown").hidden = true;
+    });
+    document.querySelector("#publish").addEventListener("click", () => {
+      window.publishClicked = true;
+    });
+  </script>
+</body>
+</html>
